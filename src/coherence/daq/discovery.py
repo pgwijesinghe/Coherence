@@ -90,3 +90,23 @@ def find_device(name: str) -> DeviceSummary | None:
         if dev.name == name:
             return dev
     return None
+
+
+def first_ai_device(devices: list[DeviceSummary]) -> DeviceSummary | None:
+    """The first device that can actually acquire. On PXI systems the chassis
+    controller (and AO-only or timing modules) enumerate as devices too, so
+    'the first device the driver lists' is not necessarily one with AI channels --
+    picking blindly used to make a chassis full of 4461s look like no hardware."""
+    return next((d for d in devices if d.ai_channel_names), None)
+
+
+def driver_version() -> str | None:
+    if not _NIDAQMX_AVAILABLE:
+        return None
+    try:
+        from nidaqmx.system import System
+
+        v = System.local().driver_version
+        return f"{v.major_version}.{v.minor_version}.{v.update_version}"
+    except Exception:  # noqa: BLE001
+        return None

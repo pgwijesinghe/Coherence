@@ -10,12 +10,12 @@ def test_startup_prefers_real_hardware_when_present(qtbot):
     window = MainWindow()
     qtbot.addWidget(window)
 
-    devices = discovery.list_devices()
-    if devices:
+    acquirable = discovery.first_ai_device(discovery.list_devices())
+    if acquirable is not None:
         assert window._backend_combo.currentText() == _BACKEND_HARDWARE
-        assert window._config.acquisition.device_name == devices[0].name
+        assert window._config.acquisition.device_name == acquirable.name
         assert window._config.acquisition.ai_channels == tuple(
-            n.split("/", 1)[-1] for n in devices[0].ai_channel_names
+            n.split("/", 1)[-1] for n in acquirable.ai_channel_names
         )
     else:
         assert window._backend_combo.currentText() == _BACKEND_SIMULATED

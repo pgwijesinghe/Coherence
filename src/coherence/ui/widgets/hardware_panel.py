@@ -84,11 +84,25 @@ class HardwarePanel(QWidget):
             self._table.setItem(row, 6, QTableWidgetItem("yes" if dev.is_simulated else "no"))
 
         if not discovery.nidaqmx_available():
-            self._summary_label.setText("nidaqmx is not installed -- only the Simulated backend is available.")
+            self._summary_label.setText(
+                'nidaqmx is not installed -- only the Simulated backend is available. '
+                'Install with: uv pip install -e ".[hardware]"'
+            )
         elif not self._devices:
-            self._summary_label.setText("No NI devices detected. Check the device is connected and powered.")
+            version = discovery.driver_version()
+            self._summary_label.setText(
+                f"NI-DAQmx {version or '?'} is installed but reports no devices. "
+                "Power the chassis before booting the PC, and check the devices "
+                "appear in NI MAX."
+            )
         else:
-            self._summary_label.setText(f"{len(self._devices)} device(s) detected.")
+            version = discovery.driver_version()
+            note = ""
+            if discovery.first_ai_device(self._devices) is None:
+                note = " -- none has AI channels, so there is nothing to acquire from."
+            self._summary_label.setText(
+                f"NI-DAQmx {version or '?'}: {len(self._devices)} device(s) detected{note}"
+            )
         self._use_device_btn.setEnabled(False)
 
     def _on_use_device(self) -> None:

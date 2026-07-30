@@ -56,7 +56,7 @@ class MainWindow(QMainWindow):
         self.resize(1360, 840)
 
         detected = discovery.list_devices()
-        first_device = detected[0] if detected else None
+        first_device = discovery.first_ai_device(detected)
         self._config: LockinConfig = autoconfigure(first_device) if first_device else default_config()
         self._pipeline: LockinPipeline | None = None
         self._hdf5_logger: HDF5ResultLogger | None = None

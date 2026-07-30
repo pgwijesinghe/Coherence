@@ -4,6 +4,36 @@ Things learned while bringing Coherence up on a real card (a USB-4431), written 
 so the next person doesn't have to rediscover them the hard way. Most of these are
 general NI-DAQmx facts rather than anything specific to this project.
 
+## Nothing detected? Start here
+
+Run the diagnostic before anything else:
+
+```
+uv run coherence --list
+```
+
+It prints the driver version and every device the driver can see, and tells you
+which of the usual suspects you're dealing with:
+
+1. *"nidaqmx is not installed"* — the environment was set up without the hardware
+   extra. Fix with `uv pip install -e ".[hardware]"`. This is easy to hit on a
+   freshly cloned machine, because the base install deliberately doesn't depend on
+   NI software.
+2. *Driver present, no devices* — the driver can't see the hardware. On PXI systems
+   the classic cause is power order: the chassis must be on before the host boots,
+   or the modules never enumerate. Confirm the cards show up in NI MAX under
+   Devices and Interfaces (with no warning icons) before expecting anything from
+   this app; if MAX can't see them, no user software can.
+3. *Devices listed but "none has AI channels"* — you're seeing chassis controllers
+   or output-only modules. The app skips those automatically when picking a device
+   at startup, and the Hardware tab shows everything so you can tell what's what.
+
+Also worth knowing: the `nidaqmx` Python package requires a reasonably recent
+DAQmx driver. On an older lab machine that has only ever run LabVIEW, the driver
+may predate what the package supports — `coherence --list` failing with a driver
+error rather than listing devices is the symptom, and updating NI-DAQmx (the
+driver, not the Python package) is the fix.
+
 ## Device names are not portable
 
 `Dev1`, `Dev2`, `PXI1Slot2` and friends are assigned by NI-MAX per machine, and they

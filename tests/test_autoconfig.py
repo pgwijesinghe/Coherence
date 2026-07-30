@@ -76,3 +76,22 @@ def test_device_with_no_ai_channels_falls_back_to_simulated():
     device = DeviceSummary(name="DevX", product_type="AO-only card", is_simulated=False)
     config = autoconfigure(device)
     assert config.acquisition.simulated is True
+
+
+def test_first_ai_device_skips_chassis_and_ao_only_modules():
+    """Regression test: on a PXI system the chassis controller enumerates as a
+    device too, often first. Startup used to take devices[0] blindly, so a chassis
+    full of 4461s autoconfigured as... the chassis, which has no AI channels, and
+    the app silently fell back to the simulated backend."""
+    from coherence.daq.discovery import first_ai_device
+
+    chassis = DeviceSummary(name="PXI1", product_type="PXIe-1082", is_simulated=False)
+    ao_only = DeviceSummary(name="PXI1Slot2", product_type="PXIe-4463", is_simulated=False,
+                            ao_channel_names=["PXI1Slot2/ao0"])
+    card = DeviceSummary(name="PXI1Slot3", product_type="PXIe-4461", is_simulated=False,
+                         ai_channel_names=["PXI1Slot3/ai0", "PXI1Slot3/ai1"],
+                         ao_channel_names=["PXI1Slot3/ao0", "PXI1Slot3/ao1"])
+
+    assert first_ai_device([chassis, ao_only, card]) is card
+    assert first_ai_device([chassis, ao_only]) is None
+    assert first_ai_device([]) is None
