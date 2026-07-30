@@ -32,6 +32,13 @@ class DeviceSummary:
     ai_max_multi_chan_rate_hz: float | None = None
     ao_max_rate_hz: float | None = None
     ao_voltage_range: tuple[float, float] | None = None
+    is_dsa: bool = False
+    """True for Dynamic Signal Acquisition cards (4461/4462/4463/4431/...). DSA
+    devices can't be combined into one multi-device DAQmx task the way M/X-series
+    cards can -- see nidaq_backend.py for what that means for synchronization."""
+    bus_type: str = ""
+    """e.g. 'PXIE', 'PXI', 'USB' -- used to prefer PXIe_Clk100 over PXI_Clk10 when
+    picking a shared reference clock for multi-device synchronization."""
 
 
 def nidaqmx_available() -> bool:
@@ -70,6 +77,10 @@ def list_devices() -> list[DeviceSummary]:
             pairs = [(float(ao_ranges[i]), float(ao_ranges[i + 1])) for i in range(0, len(ao_ranges) - 1, 2)]
             ao_range = max(pairs, key=lambda r: r[1] - r[0])
 
+        category = _try(lambda: dev.product_category)
+        category_name = getattr(category, "name", str(category or ""))
+        bus_type = getattr(_try(lambda: dev.bus_type), "name", "") or ""
+
         summaries.append(
             DeviceSummary(
                 name=dev.name,
@@ -80,6 +91,8 @@ def list_devices() -> list[DeviceSummary]:
                 ai_max_multi_chan_rate_hz=_try(lambda: float(dev.ai_max_multi_chan_rate)),
                 ao_max_rate_hz=_try(lambda: float(dev.ao_max_rate)),
                 ao_voltage_range=ao_range,
+                is_dsa=category_name.upper() == "DSA",
+                bus_type=bus_type,
             )
         )
     return summaries

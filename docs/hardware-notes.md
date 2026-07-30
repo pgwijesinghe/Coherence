@@ -38,24 +38,68 @@ full physical paths (`"PXI1Slot3/ai0"`), not a bare channel name plus one shared
 device name — that's what lets channels from several cards sit side by side in
 one config, and what `effective_ai_config` and the FFT engine key off unchanged.
 
-All AI channels, regardless of device, go into a single DAQmx task. Multi-device
-tasks that share a chassis backplane are synchronized by the driver itself —
-DAQmx elects a timing master among the participating devices and distributes the
-sample clock and start trigger over the backplane automatically. This is standard
-driver behavior for simultaneous multi-module acquisition, not something this
-project implements; `clock_source` / `start_trigger_source` on `NIDaqBackend`
-remain available for a non-standard timing arrangement, but shouldn't be needed
-for cards in one PXI/PXIe chassis.
+**Correction, found on real multi-card hardware:** an earlier version of this
+project assumed DAQmx would transparently combine AI channels from several
+devices into one task and synchronize them itself. That's wrong for DSA cards.
+Putting a 4461's channels in the same task as a second 4461's channels fails
+outright with *"One or more devices do not support multidevice tasks."* DSA
+cards (4461/4462/4463, this project's own 4431) can't be combined into a
+multi-device task at all — full stop, not a degraded/unsynchronized fallback,
+a hard error.
+
+The actual fix, ported from a sibling project already verified on real
+multi-card PXIe-4461 chassis hardware: **one DAQmx task per device**, kept
+sample-aligned by explicitly wiring three things across the per-device tasks,
+matching the classic DAQmx multi-card synchronization recipe:
+
+1. **Reference clock.** Every task's timebase locks to the same chassis clock
+   (`task.timing.ref_clk_src = "PXIe_Clk100"`, falling back to `"PXI_Clk10"` if
+   rejected) — applied to *every* task, master included. Without this each
+   card's onboard oscillator free-runs independently and they drift apart over
+   a long acquisition.
+2. **Sync pulse.** A shared clock alone still isn't enough for DSA cards
+   specifically: their delta-sigma converters carry internal decimation filter
+   state that a clock and trigger don't reset, so two cards can land a sample
+   or more apart even with perfect clock sync. Every slave task's
+   `timing.sync_pulse_src` points at `/<master_device>/SyncPulse`; every task
+   (master included) then gets `timing.sync_pulse_min_delay_to_start` set to
+   the *worst-case* `sync_pulse_sync_time` reported across all participating
+   devices, so nothing starts before the slowest card has settled.
+3. **Start trigger.** Every slave task's start trigger is configured to
+   `/<master_device>/ai/StartTrigger`. Calling `.start()` on a task with a
+   digital-edge start trigger configured just arms it and returns — it doesn't
+   actually begin until the edge arrives. Slave tasks are started first (armed,
+   waiting), the master task is started *last*, and that's the edge that
+   releases every armed slave at the same sample.
+
+Reading back is a single background thread that, once per chunk, calls
+`read_many_sample` on each device's own `AnalogMultiChannelReader` in turn and
+writes each device's block into its column range of one shared array — no
+per-device timestamp reconciliation, because steps 1–3 above are what
+guarantee sample index *n* means the same instant on every device. If ref
+clock or sync pulse silently failed to apply to some card (both degrade
+gracefully rather than raising), that concatenation is no longer trustworthy —
+`NIDaqBackend.sync_report` logs exactly what was and wasn't applied, at INFO
+level, so a synchronization problem shows up in the log instead of just
+producing quietly-wrong data.
+
+Master selection: the first device in `acquisition.devices` (i.e. the device
+of the first channel in `acquisition.ai_channels`) — there's no override for
+this yet, unlike the single-device path's `clock_source`/`start_trigger_source`
+parameters.
 
 The sample rate for a multi-device acquisition is bounded by whichever
 participating device is slowest — `_validate_against_detected_hardware` checks
 against the minimum across all of them and names the limiting device if the
 configured rate is too high.
 
-Caveat: this is verified by unit test and by construction, not by running it on
-an actual multi-card chassis (development happened against a single USB-4431).
-If cross-device sync behaves differently than described above on real chassis
-hardware, that mismatch is the first thing to check.
+This sync sequence is a direct, careful port of a proven implementation (see
+that project's `sessions.py`) rather than something re-derived from scratch,
+specifically because a wrong guess here produces data that *looks* fine —
+every channel reads a plausible-looking amplitude and phase — while actually
+being misaligned by an unknown number of samples between cards. The single-
+device path (one card, no cross-task sync needed) is untouched by any of this
+and remains the same code verified extensively via loopback tests.
 
 The Hardware tab's device table supports selecting more than one row (Ctrl/Shift-
 click) — "Use Selected" combines just those cards, "Use All Detected" combines

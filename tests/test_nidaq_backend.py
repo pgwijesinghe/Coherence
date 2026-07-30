@@ -119,3 +119,127 @@ def test_default_driver_buffer_has_several_seconds_of_slack():
     acq = AcquisitionConfig(sample_rate_hz=51_200.0, ai_channels=("Dev1/ai0",))
     backend = NIDaqBackend(acq, callback_chunk_size=512)
     assert backend._driver_buffer_samples / acq.sample_rate_hz >= 3.0
+
+
+# -- multi-device synchronization (ported from a sibling project verified on real
+# multi-card PXIe-4461 chassis hardware -- see docs/hardware-notes.md) -----------
+
+
+class _FakeTiming:
+    """Stands in for task.timing: plain attribute assignment, optionally rejecting
+    specific values to simulate a device that doesn't support a given clock source."""
+
+    def __init__(self, rejects: set[str] | None = None, sync_time: float = 0.0):
+        self._rejects = rejects or set()
+        self.sync_pulse_sync_time = sync_time
+        self.sync_pulse_min_delay_to_start = None
+        self.ref_clk_src = None
+        self.ref_clk_rate = None
+        self.sync_pulse_src = None
+
+    def __setattr__(self, name, value):
+        if name == "ref_clk_src" and value in getattr(self, "_rejects", ()):
+            raise RuntimeError(f"device rejects {value}")
+        super().__setattr__(name, value)
+
+
+class _FakeTask:
+    def __init__(self, rejects: set[str] | None = None, sync_time: float = 0.0):
+        self.timing = _FakeTiming(rejects=rejects, sync_time=sync_time)
+
+
+def _backend():
+    from coherence.daq.nidaq_backend import NIDaqBackend
+
+    acq = AcquisitionConfig(ai_channels=("Dev1/ai0", "Dev2/ai0"))
+    return NIDaqBackend(acq)
+
+
+def test_reference_clock_prefers_100mhz_when_requested_and_applies_to_every_task():
+    backend = _backend()
+    tasks = {"Dev1": _FakeTask(), "Dev2": _FakeTask()}
+    backend._apply_reference_clock(tasks, prefer_100mhz=True)
+
+    assert all(t.timing.ref_clk_src == "PXIe_Clk100" for t in tasks.values())
+    assert any("PXIe_Clk100" in line for line in backend.sync_report)
+
+
+def test_reference_clock_falls_back_when_100mhz_rejected():
+    backend = _backend()
+    # Dev2 can't do PXIe_Clk100 -- the whole group must fall back to PXI_Clk10 together,
+    # not leave Dev1 on one clock and Dev2 on another.
+    tasks = {"Dev1": _FakeTask(), "Dev2": _FakeTask(rejects={"PXIe_Clk100"})}
+    backend._apply_reference_clock(tasks, prefer_100mhz=True)
+
+    assert all(t.timing.ref_clk_src == "PXI_Clk10" for t in tasks.values())
+
+
+def test_reference_clock_degrades_gracefully_when_nothing_works():
+    backend = _backend()
+    tasks = {
+        "Dev1": _FakeTask(rejects={"PXIe_Clk100", "PXI_Clk10"}),
+        "Dev2": _FakeTask(rejects={"PXIe_Clk100", "PXI_Clk10"}),
+    }
+    backend._apply_reference_clock(tasks, prefer_100mhz=True)  # must not raise
+
+    assert any("none applied" in line for line in backend.sync_report)
+
+
+def test_sync_pulse_routes_slaves_to_master_and_sets_worst_case_settle_delay():
+    backend = _backend()
+    tasks = {
+        "Dev1": _FakeTask(sync_time=0.002),  # master
+        "Dev2": _FakeTask(sync_time=0.005),  # slave, slower settle time
+    }
+    backend._apply_sync_pulse(tasks, master_dev="Dev1")
+
+    assert tasks["Dev2"].timing.sync_pulse_src == "/Dev1/SyncPulse"
+    assert tasks["Dev1"].timing.sync_pulse_src is None  # master doesn't route to itself
+    # worst-case delay applied to EVERY task, including the master
+    assert tasks["Dev1"].timing.sync_pulse_min_delay_to_start == 0.005
+    assert tasks["Dev2"].timing.sync_pulse_min_delay_to_start == 0.005
+
+
+class _FakeReader:
+    """Stands in for nidaqmx.stream_readers.AnalogMultiChannelReader: fills the
+    caller's buffer with a fixed, recognizable value per device instead of reading
+    real hardware."""
+
+    def __init__(self, fill_value: float):
+        self._fill_value = fill_value
+
+    def read_many_sample(self, buf, number_of_samples_per_channel, timeout):
+        buf[:] = self._fill_value
+
+
+def test_read_loop_combines_per_device_blocks_into_the_right_columns():
+    """The whole point of the multi-device read loop: each device's block lands in
+    its own column range of one combined array, in acquisition.ai_channels order --
+    no per-device timestamp reconciliation, just column-slice assembly (matching the
+    proven reference implementation)."""
+    import numpy as np
+
+    from coherence.config import AcquisitionConfig
+
+    backend = _backend()
+    backend._acq = AcquisitionConfig(ai_channels=("Dev1/ai0", "Dev1/ai1", "Dev2/ai0"))
+    backend._num_channels = 3
+    backend._callback_chunk_size = 4
+    backend._channels_by_device = {"Dev1": ["Dev1/ai0", "Dev1/ai1"], "Dev2": ["Dev2/ai0"]}
+    backend._device_order = ["Dev1", "Dev2"]
+    backend._readers = {"Dev1": _FakeReader(1.0), "Dev2": _FakeReader(2.0)}
+
+    received = []
+
+    def on_chunk(arr):
+        received.append(arr.copy())
+        backend._stop_event.set()
+
+    backend._stop_event.clear()
+    backend._read_loop(on_chunk)
+
+    assert len(received) == 1
+    combined = received[0]
+    assert combined.shape == (4, 3)
+    assert np.all(combined[:, 0:2] == 1.0)  # Dev1's two channels
+    assert np.all(combined[:, 2:3] == 2.0)  # Dev2's one channel

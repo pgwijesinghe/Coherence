@@ -142,13 +142,17 @@ good end-to-end check that acquisition, timing, and the demodulation math all ag
 ## Status
 
 Working and verified on a USB-4431. Every AI channel across every detected device
-combines into one flat channel list, and all of them acquire together in a single
-synchronized DAQmx task spanning as many cards as are connected — a chassis with
-several 4461s shows up as one roster, not one card at a time. See
-[docs/hardware-notes.md](docs/hardware-notes.md) for how that's wired and what it
-relies on; it's verified by unit test and by construction, not yet exercised on an
-actual multi-card chassis. If AO and AI must be phase-locked with no arbitrary
-offset, both need to share a start trigger — the hooks are in `nidaq_backend.py`
+combines into one flat channel list — a chassis with several 4461s shows up as
+one roster, not one card at a time. DSA cards (the 4461 family) reject being
+combined into a single multi-device DAQmx task outright, so multi-card
+acquisition uses one task per device, kept sample-aligned by explicitly sharing
+a reference clock, a DSA sync pulse, and a start trigger — the classic DAQmx
+multi-card recipe, ported from a sibling project already verified on real
+multi-card PXIe-4461 chassis hardware. See
+[docs/hardware-notes.md](docs/hardware-notes.md) for exactly what that relies
+on and what's been checked versus what hasn't. If AO and AI must be
+phase-locked with no arbitrary offset, both need to share a start trigger —
+the hooks are in `nidaq_backend.py`
 (`clock_source`, `start_trigger_source`); on a free-running setup the relative
 phase is constant within a run but arbitrary between runs.
 
