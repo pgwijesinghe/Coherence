@@ -4,8 +4,8 @@ from coherence.daq.autoconfig import autoconfigure
 from coherence.daq.discovery import DeviceSummary
 
 
-def test_no_device_falls_back_to_simulated_demo():
-    config = autoconfigure(None)
+def test_no_devices_falls_back_to_simulated_demo():
+    config = autoconfigure([])
     assert config.acquisition.simulated is True
     assert len(config.channels) > 0
 
@@ -21,10 +21,9 @@ def test_autoconfigures_one_channel_per_physical_ai():
         ao_max_rate_hz=96_000.0,
         ao_voltage_range=(-3.5, 3.5),
     )
-    config = autoconfigure(device)
+    config = autoconfigure([device])
 
-    assert config.acquisition.device_name == "Dev2"
-    assert config.acquisition.ai_channels == ("ai0", "ai1", "ai2", "ai3")
+    assert config.acquisition.ai_channels == ("Dev2/ai0", "Dev2/ai1", "Dev2/ai2", "Dev2/ai3")
     assert len(config.channels) == 4
     assert [c.input_channel for c in config.channels] == [0, 1, 2, 3]
     # only the first channel starts enabled -- something to look at immediately,
@@ -33,8 +32,53 @@ def test_autoconfigures_one_channel_per_physical_ai():
     assert all(not c.enabled for c in config.channels[1:])
 
     assert len(config.ao_channels) == 1
-    assert config.ao_channels[0].ao_channel == "ao0"
+    assert config.ao_channels[0].ao_channel == "Dev2/ao0"
     assert config.ao_channels[0].enabled is False  # never auto-enabled
+
+
+def test_multiple_devices_combine_into_one_channel_roster():
+    """The actual point of multi-device support: a chassis full of cards should
+    show up as one flat list of channels, not force picking a single card."""
+    card_a = DeviceSummary(
+        name="PXI1Slot3", product_type="PXIe-4461", is_simulated=False,
+        ai_channel_names=["PXI1Slot3/ai0", "PXI1Slot3/ai1"],
+        ao_channel_names=["PXI1Slot3/ao0", "PXI1Slot3/ao1"],
+        ai_max_multi_chan_rate_hz=204_800.0,
+    )
+    card_b = DeviceSummary(
+        name="PXI1Slot5", product_type="PXIe-4461", is_simulated=False,
+        ai_channel_names=["PXI1Slot5/ai0", "PXI1Slot5/ai1"],
+        ao_channel_names=["PXI1Slot5/ao0", "PXI1Slot5/ao1"],
+        ai_max_multi_chan_rate_hz=204_800.0,
+    )
+    config = autoconfigure([card_a, card_b])
+
+    assert config.acquisition.ai_channels == (
+        "PXI1Slot3/ai0", "PXI1Slot3/ai1", "PXI1Slot5/ai0", "PXI1Slot5/ai1",
+    )
+    assert len(config.channels) == 4
+    assert len(config.ao_channels) == 4
+    assert config.ao_channels[2].ao_channel == "PXI1Slot5/ao0"
+    # only the very first channel overall is enabled, not one per device
+    assert [c.enabled for c in config.channels] == [True, False, False, False]
+
+
+def test_sample_rate_bounded_by_slowest_of_several_devices():
+    fast = DeviceSummary(name="Dev1", product_type="Fast", is_simulated=False,
+                         ai_channel_names=["Dev1/ai0"], ai_max_multi_chan_rate_hz=1_000_000.0)
+    slow = DeviceSummary(name="Dev2", product_type="Slow", is_simulated=False,
+                         ai_channel_names=["Dev2/ai0"], ai_max_multi_chan_rate_hz=10_000.0)
+    config = autoconfigure([fast, slow])
+    assert config.acquisition.sample_rate_hz == pytest.approx(10_000.0)
+
+
+def test_ao_only_device_still_contributes_outputs_alongside_ai_devices():
+    ai_card = DeviceSummary(name="Dev1", product_type="4461", is_simulated=False,
+                            ai_channel_names=["Dev1/ai0"], ao_channel_names=["Dev1/ao0"])
+    ao_only_card = DeviceSummary(name="Dev2", product_type="4463", is_simulated=False,
+                                 ao_channel_names=["Dev2/ao0", "Dev2/ao1"])
+    config = autoconfigure([ai_card, ao_only_card])
+    assert {a.ao_channel for a in config.ao_channels} == {"Dev1/ao0", "Dev2/ao0", "Dev2/ao1"}
 
 
 def test_placeholder_frequencies_are_coherent():
@@ -43,7 +87,7 @@ def test_placeholder_frequencies_are_coherent():
         ai_channel_names=["Dev2/ai0"], ao_channel_names=["Dev2/ao0"],
         ai_max_multi_chan_rate_hz=102_400.0,
     )
-    config = autoconfigure(device)
+    config = autoconfigure([device])
     for ch in config.channels:
         assert config.coherence_error_hz(ch) < 1e-9
     for ao in config.ao_channels:
@@ -56,7 +100,7 @@ def test_sample_rate_clamped_to_device_max():
         ai_channel_names=["Dev3/ai0"], ao_channel_names=[],
         ai_max_multi_chan_rate_hz=10_000.0,  # below the 51.2 kHz default target
     )
-    config = autoconfigure(device)
+    config = autoconfigure([device])
     assert config.acquisition.sample_rate_hz == pytest.approx(10_000.0)
 
 
@@ -68,13 +112,14 @@ def test_sample_rate_not_pushed_to_device_max_when_max_is_high():
         ai_channel_names=["Dev4/ai0"], ao_channel_names=[],
         ai_max_multi_chan_rate_hz=1_000_000.0,
     )
-    config = autoconfigure(device)
+    config = autoconfigure([device])
     assert config.acquisition.sample_rate_hz == pytest.approx(51_200.0)
 
 
-def test_device_with_no_ai_channels_falls_back_to_simulated():
-    device = DeviceSummary(name="DevX", product_type="AO-only card", is_simulated=False)
-    config = autoconfigure(device)
+def test_devices_with_no_ai_channels_fall_back_to_simulated():
+    device = DeviceSummary(name="DevX", product_type="AO-only card", is_simulated=False,
+                           ao_channel_names=["DevX/ao0"])
+    config = autoconfigure([device])
     assert config.acquisition.simulated is True
 
 

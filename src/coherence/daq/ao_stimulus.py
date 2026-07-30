@@ -41,17 +41,19 @@ class AOChannelSpec:
     """One physical AO channel, generating the sum of one or more tones."""
 
     ao_channel: str
-    """Physical channel, e.g. 'ao0'."""
+    """Full physical channel path, e.g. 'Dev1/ao0' or 'PXI1Slot5/ao0' -- device-
+    qualified so outputs can live on any card in a multi-device setup."""
     tones: list[ToneSpec] = field(default_factory=list)
     voltage_range: tuple[float, float] = (-10.0, 10.0)
 
 
 class AOStimulusGenerator:
-    """Continuously regenerates a fixed multitone waveform across one or more AO channels."""
+    """Continuously regenerates a fixed multitone waveform across one or more AO
+    channels. Channels may span multiple devices -- they're all added to one DAQmx
+    task, the same multi-device-task mechanism the AI backend relies on."""
 
     def __init__(
         self,
-        device_name: str,
         sample_rate_hz: float,
         buffer_size: int,
         channels: list[AOChannelSpec],
@@ -63,7 +65,6 @@ class AOStimulusGenerator:
             )
         if not channels:
             raise ValueError("at least one AO channel is required")
-        self._device_name = device_name
         self._sample_rate_hz = sample_rate_hz
         self._buffer_size = buffer_size
         self._channels = channels
@@ -110,9 +111,7 @@ class AOStimulusGenerator:
         try:
             for spec in self._channels:
                 lo, hi = spec.voltage_range
-                task.ao_channels.add_ao_voltage_chan(
-                    f"{self._device_name}/{spec.ao_channel}", min_val=lo, max_val=hi
-                )
+                task.ao_channels.add_ao_voltage_chan(spec.ao_channel, min_val=lo, max_val=hi)
             task.timing.cfg_samp_clk_timing(
                 rate=self._sample_rate_hz,
                 sample_mode=AcquisitionType.CONTINUOUS,

@@ -4,14 +4,24 @@ Requires the `nidaqmx` Python package and the NI-DAQmx driver to be installed; b
 optional (see the `hardware` extra in pyproject.toml) since this module must still be
 importable on a dev machine that only ever runs the simulated backend.
 
-Synchronization notes (see project README section 4):
-  - For multi-card setups, route a shared reference (PXI_CLK10 or a PXIe star-trigger
-    clock) to every card's sample clock, and share a single start trigger, so that
-    `block_start_sample` means the same absolute instant on every channel. Pass
-    `clock_source` / `start_trigger_source` to wire this up via DAQmx terminal routing.
-  - Keep `samples_per_channel` (the internal driver buffer) generous relative to
-    `callback_chunk_size` so OS scheduling jitter doesn't cause an overrun -- Windows is
-    not a hard real-time OS.
+Multi-device acquisition: `acquisition.ai_channels` holds full physical channel paths
+(e.g. "PXI1Slot3/ai0", "PXI1Slot5/ai0"), so channels from several cards can be listed
+together. All of them go into ONE nidaqmx.Task -- this is deliberate, not incidental:
+DAQmx synchronizes every device in a single task automatically over the chassis
+backplane when they're in the same PXI/PXIe chassis (this is standard driver behavior
+for multi-module simultaneous acquisition, not something this code implements itself).
+Keep `samples_per_channel` (the internal driver buffer) generous relative to
+`callback_chunk_size` so OS scheduling jitter doesn't cause an overrun -- Windows is
+not a hard real-time OS.
+
+`clock_source` / `start_trigger_source` remain available for the less common case of
+an external or non-standard timing arrangement, but are not needed for the ordinary
+same-chassis multi-card case above.
+
+Caveat: developed and verified against a single USB-4431 (see scripts/loopback_test.py
+and scripts/gui_autoconfig_longrun_test.py). The multi-device path has not been
+exercised on real multi-card chassis hardware -- if you hit something DAQmx-specific
+that doesn't match the description above, that's the first place to look.
 """
 
 from __future__ import annotations
@@ -90,44 +100,59 @@ class NIDaqBackend(AcquisitionBackend):
         return self._num_channels
 
     def _validate_against_detected_hardware(self) -> None:
-        """Catch the two most common misconfigurations -- a stale/wrong device name and
-        a sample rate the device can't actually do -- before opening a task, so the error
-        names what's wrong instead of surfacing a raw DAQmx status code.
+        """Catch the most common misconfigurations -- a stale/wrong device name, a
+        channel that doesn't exist, a sample rate no participating device can do --
+        before opening a task, so the error names what's wrong instead of surfacing a
+        raw DAQmx status code.
 
         Device names (`Dev1`, `Dev2`, `PXI1Slot2`, ...) are assigned by NI-MAX and are
-        NOT portable across machines or reinstalls; a config saved on one machine will
-        commonly point at a device name that doesn't exist (or means something else) on
-        another. Skips silently if nidaqmx can't enumerate anything (e.g. driver present
-        but no permission to query devices) -- that's not this function's job to diagnose.
+        NOT portable across machines or reinstalls. Skips silently if nidaqmx can't
+        enumerate anything (e.g. driver present but no permission to query devices) --
+        that's not this function's job to diagnose.
         """
         devices = discovery.list_devices()
         if not devices:
             return  # discovery itself couldn't reach the driver; let task creation surface why
+        by_name = {d.name: d for d in devices}
 
-        device = next((d for d in devices if d.name == self._acq.device_name), None)
-        if device is None:
+        referenced = self._acq.devices
+        missing_devices = [d for d in referenced if d not in by_name]
+        if missing_devices:
             available = ", ".join(f"{d.name} ({d.product_type})" for d in devices) or "none"
             raise RuntimeError(
-                f"Device {self._acq.device_name!r} was not found. Detected devices: {available}. "
-                "Device names are assigned by NI-MAX and differ between machines -- update "
-                "the device name in Configure to match one of the detected devices above."
+                f"Device(s) {missing_devices} not found. Detected devices: {available}. "
+                "Device names are assigned by NI-MAX and differ between machines -- "
+                "rescan in the Hardware tab and rebuild the roster from what's actually connected."
             )
 
-        if len(self._acq.ai_channels) > len(device.ai_channel_names):
-            raise RuntimeError(
-                f"Configured {len(self._acq.ai_channels)} AI channels "
-                f"{self._acq.ai_channels} but {device.name} only has "
-                f"{len(device.ai_channel_names)}: {device.ai_channel_names}."
-            )
+        for dev_name in referenced:
+            device = by_name[dev_name]
+            wanted = [ch for ch in self._acq.ai_channels if ch.split("/", 1)[0] == dev_name]
+            unknown = [ch for ch in wanted if ch not in device.ai_channel_names]
+            if unknown:
+                raise RuntimeError(
+                    f"{device.name} has no channel(s) {unknown}. It has: {device.ai_channel_names}."
+                )
 
-        max_rate = device.ai_max_multi_chan_rate_hz
-        if max_rate is not None and self._acq.sample_rate_hz > max_rate:
-            raise RuntimeError(
-                f"Sample rate {self._acq.sample_rate_hz:,.0f} Hz exceeds {device.name}'s "
-                f"max multi-channel AI rate of {max_rate:,.0f} Hz. Lower the sample rate "
-                "in Configure (and re-check bin coherence for your demodulation frequencies "
-                "at the new rate)."
-            )
+        max_rates = {
+            d: by_name[d].ai_max_multi_chan_rate_hz
+            for d in referenced
+            if by_name[d].ai_max_multi_chan_rate_hz is not None
+        }
+        if max_rates:
+            limiting_device, limiting_rate = min(max_rates.items(), key=lambda kv: kv[1])
+            if self._acq.sample_rate_hz > limiting_rate:
+                note = (
+                    f" (the slowest of {len(referenced)} devices in this acquisition)"
+                    if len(referenced) > 1
+                    else ""
+                )
+                raise RuntimeError(
+                    f"Sample rate {self._acq.sample_rate_hz:,.0f} Hz exceeds {limiting_device}'s "
+                    f"max multi-channel AI rate of {limiting_rate:,.0f} Hz{note}. Lower the sample "
+                    "rate in Configure (and re-check bin coherence for your demodulation "
+                    "frequencies at the new rate)."
+                )
 
     def start(self, on_chunk: ChunkCallback) -> None:
         if self._task is not None:
@@ -139,7 +164,7 @@ class NIDaqBackend(AcquisitionBackend):
         try:
             for ai in self._acq.ai_channels:
                 task.ai_channels.add_ai_voltage_chan(
-                    f"{self._acq.device_name}/{ai}",
+                    ai,
                     terminal_config=TerminalConfiguration.DEFAULT,
                     min_val=-self._acq.input_range_v,
                     max_val=self._acq.input_range_v,
@@ -180,8 +205,7 @@ class NIDaqBackend(AcquisitionBackend):
         except Exception as exc:
             task.close()
             raise RuntimeError(
-                f"Failed to open {self._acq.device_name!r} ({self._acq.ai_channels}) "
-                f"at {self._acq.sample_rate_hz:,.0f} Hz: {exc}"
+                f"Failed to open {self._acq.ai_channels} at {self._acq.sample_rate_hz:,.0f} Hz: {exc}"
             ) from exc
 
     def stop(self) -> None:

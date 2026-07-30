@@ -48,12 +48,11 @@ def main() -> int:
             block_size=block_size,
             overlap_fraction=0.5,
             window="blackmanharris",
-            device_name=dev.name,
-            ai_channels=("ai0",),
+            ai_channels=(dev.ai_channel_names[0],),
             input_range_v=10.0,
         ),
         channels=[ChannelConfig(name="CH1", frequency_hz=freq, input_channel=0)],
-        ao_channels=[AOChannelConfig(name="REF1", frequency_hz=freq, ao_channel="ao0", amplitude_v=1.0)],
+        ao_channels=[AOChannelConfig(name="REF1", frequency_hz=freq, ao_channel=dev.ao_channel_names[0], amplitude_v=1.0)],
     )
     window._apply_channels_to_widgets()
 

@@ -28,7 +28,8 @@ _COLUMNS = ["Device", "Product Type", "AI Channels", "AO Channels", "Max AI Rate
 
 class HardwarePanel(QWidget):
     device_activated = Signal(object)
-    """Emitted with a DeviceSummary when the user picks 'Use this device'."""
+    """Emitted with a list[DeviceSummary] -- either the selected rows, or every
+    detected device -- to combine into one acquisition config."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -50,21 +51,28 @@ class HardwarePanel(QWidget):
         self._table.setHorizontalHeaderLabels(_COLUMNS)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        # Multiple rows can be combined into one synchronized multi-device acquisition --
+        # e.g. selecting 3 of 6 chassis cards to use together. Ctrl/Shift-click to select more than one.
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self._table, stretch=1)
 
         footer = QHBoxLayout()
         footer.addStretch(1)
-        self._use_device_btn = QPushButton("Use This Device")
-        self._use_device_btn.setEnabled(False)
-        self._use_device_btn.clicked.connect(self._on_use_device)
-        footer.addWidget(self._use_device_btn)
+        self._use_all_btn = QPushButton("Use All Detected")
+        self._use_all_btn.setToolTip("Combine every detected device into one synchronized acquisition")
+        self._use_all_btn.clicked.connect(self._on_use_all)
+        footer.addWidget(self._use_all_btn)
+        self._use_selected_btn = QPushButton("Use Selected")
+        self._use_selected_btn.setEnabled(False)
+        self._use_selected_btn.setToolTip("Combine only the selected device(s)")
+        self._use_selected_btn.clicked.connect(self._on_use_selected)
+        footer.addWidget(self._use_selected_btn)
         layout.addLayout(footer)
 
         self._table.itemSelectionChanged.connect(
-            lambda: self._use_device_btn.setEnabled(bool(self._table.selectedIndexes()))
+            lambda: self._use_selected_btn.setEnabled(bool(self._table.selectedIndexes()))
         )
 
         self.rescan()
@@ -97,17 +105,23 @@ class HardwarePanel(QWidget):
             )
         else:
             version = discovery.driver_version()
-            note = ""
-            if discovery.first_ai_device(self._devices) is None:
-                note = " -- none has AI channels, so there is nothing to acquire from."
+            ai_capable = [d for d in self._devices if d.ai_channel_names]
+            total_ai = sum(len(d.ai_channel_names) for d in ai_capable)
+            total_ao = sum(len(d.ao_channel_names) for d in self._devices)
+            note = " -- none has AI channels, so there is nothing to acquire from" if not ai_capable else (
+                f", {total_ai} AI + {total_ao} AO channel(s) total"
+            )
             self._summary_label.setText(
                 f"NI-DAQmx {version or '?'}: {len(self._devices)} device(s) detected{note}"
             )
-        self._use_device_btn.setEnabled(False)
+        self._use_selected_btn.setEnabled(False)
 
-    def _on_use_device(self) -> None:
-        rows = {idx.row() for idx in self._table.selectedIndexes()}
+    def _on_use_all(self) -> None:
+        if self._devices:
+            self.device_activated.emit(list(self._devices))
+
+    def _on_use_selected(self) -> None:
+        rows = sorted({idx.row() for idx in self._table.selectedIndexes()})
         if not rows:
             return
-        device = self._devices[next(iter(rows))]
-        self.device_activated.emit(device)
+        self.device_activated.emit([self._devices[r] for r in rows])

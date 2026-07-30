@@ -13,10 +13,7 @@ def test_startup_prefers_real_hardware_when_present(qtbot):
     acquirable = discovery.first_ai_device(discovery.list_devices())
     if acquirable is not None:
         assert window._backend_combo.currentText() == _BACKEND_HARDWARE
-        assert window._config.acquisition.device_name == acquirable.name
-        assert window._config.acquisition.ai_channels == tuple(
-            n.split("/", 1)[-1] for n in acquirable.ai_channel_names
-        )
+        assert set(acquirable.ai_channel_names) <= set(window._config.acquisition.ai_channels)
     else:
         assert window._backend_combo.currentText() == _BACKEND_SIMULATED
         assert window._config.acquisition.simulated is True
@@ -32,13 +29,29 @@ def test_device_activated_rebuilds_config_after_confirmation(qtbot, monkeypatch)
         ai_channel_names=["DevFake/ai0", "DevFake/ai1"], ao_channel_names=["DevFake/ao0"],
         ai_max_multi_chan_rate_hz=44_100.0,
     )
-    window._on_device_activated(fake_device)
+    window._on_device_activated([fake_device])
 
-    assert window._config.acquisition.device_name == "DevFake"
-    assert window._config.acquisition.ai_channels == ("ai0", "ai1")
+    assert window._config.acquisition.ai_channels == ("DevFake/ai0", "DevFake/ai1")
     assert len(window._config.channels) == 2
     assert len(window._config.ao_channels) == 1
     assert window._backend_combo.currentText() == _BACKEND_HARDWARE
+
+
+def test_device_activated_combines_multiple_devices(qtbot, monkeypatch):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+
+    card_a = DeviceSummary(name="PXI1Slot3", product_type="PXIe-4461", is_simulated=True,
+                           ai_channel_names=["PXI1Slot3/ai0", "PXI1Slot3/ai1"])
+    card_b = DeviceSummary(name="PXI1Slot5", product_type="PXIe-4461", is_simulated=True,
+                           ai_channel_names=["PXI1Slot5/ai0", "PXI1Slot5/ai1"])
+    window._on_device_activated([card_a, card_b])
+
+    assert window._config.acquisition.ai_channels == (
+        "PXI1Slot3/ai0", "PXI1Slot3/ai1", "PXI1Slot5/ai0", "PXI1Slot5/ai1",
+    )
+    assert len(window._config.channels) == 4
 
 
 def test_device_activated_declined_leaves_config_unchanged(qtbot, monkeypatch):
@@ -46,14 +59,14 @@ def test_device_activated_declined_leaves_config_unchanged(qtbot, monkeypatch):
     qtbot.addWidget(window)
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No)
 
-    original_device_name = window._config.acquisition.device_name
+    original_ai_channels = window._config.acquisition.ai_channels
     fake_device = DeviceSummary(
         name="DevFake", product_type="Fake Card", is_simulated=True,
         ai_channel_names=["DevFake/ai0"], ao_channel_names=[],
     )
-    window._on_device_activated(fake_device)
+    window._on_device_activated([fake_device])
 
-    assert window._config.acquisition.device_name == original_device_name
+    assert window._config.acquisition.ai_channels == original_ai_channels
 
 
 def test_device_activated_blocked_while_running(qtbot, monkeypatch):
@@ -66,12 +79,12 @@ def test_device_activated_blocked_while_running(qtbot, monkeypatch):
 
     monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
-    original_device_name = window._config.acquisition.device_name
+    original_ai_channels = window._config.acquisition.ai_channels
 
     fake_device = DeviceSummary(name="DevFake", product_type="Fake", is_simulated=True,
                                  ai_channel_names=["DevFake/ai0"], ao_channel_names=[])
-    window._on_device_activated(fake_device)
-    assert window._config.acquisition.device_name == original_device_name
+    window._on_device_activated([fake_device])
+    assert window._config.acquisition.ai_channels == original_ai_channels
 
     window._on_stop()
 

@@ -66,14 +66,14 @@ def test_effective_ai_config_remaps_input_channel_to_new_position():
 def test_effective_ai_config_preserves_other_acquisition_fields():
     acq = AcquisitionConfig(
         sample_rate_hz=51_200.0, block_size=2048, window="hann",
-        device_name="Dev2", ai_channels=("ai0", "ai1"),
+        ai_channels=("Dev2/ai0", "Dev2/ai1"),
     )
     channels = [ChannelConfig(name="AI0", frequency_hz=1000.0, input_channel=0, enabled=True)]
     effective = effective_ai_config(LockinConfig(acquisition=acq, channels=channels))
     assert effective.acquisition.sample_rate_hz == 51_200.0
     assert effective.acquisition.block_size == 2048
     assert effective.acquisition.window == "hann"
-    assert effective.acquisition.device_name == "Dev2"
+    assert effective.acquisition.ai_channels == ("Dev2/ai0",)
 
 
 def test_effective_ai_config_dedupes_channels_sharing_one_physical_input():

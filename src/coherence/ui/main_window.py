@@ -56,8 +56,8 @@ class MainWindow(QMainWindow):
         self.resize(1360, 840)
 
         detected = discovery.list_devices()
-        first_device = discovery.first_ai_device(detected)
-        self._config: LockinConfig = autoconfigure(first_device) if first_device else default_config()
+        has_hardware = discovery.first_ai_device(detected) is not None
+        self._config: LockinConfig = autoconfigure(detected) if has_hardware else default_config()
         self._pipeline: LockinPipeline | None = None
         self._hdf5_logger: HDF5ResultLogger | None = None
         self._ao_generator: AOStimulusGenerator | None = None
@@ -69,7 +69,7 @@ class MainWindow(QMainWindow):
         self._build_status_bar()
         self._apply_channels_to_widgets()
 
-        if first_device is not None:
+        if has_hardware:
             idx = self._backend_combo.findText(_BACKEND_HARDWARE)
             if idx >= 0:
                 self._backend_combo.setCurrentIndex(idx)
@@ -226,20 +226,23 @@ class MainWindow(QMainWindow):
             self._status_pill.setStyleSheet(f"background-color: {BAD}; color: #0b0d10;")
 
     # ------------------------------------------------------------------ actions
-    def _on_device_activated(self, device: DeviceSummary) -> None:
+    def _on_device_activated(self, devices: list[DeviceSummary]) -> None:
         if self._pipeline is not None:
             QMessageBox.information(self, "Stop first", "Stop acquisition before switching devices.")
             return
+        names = ", ".join(f"{d.name} ({d.product_type})" for d in devices)
+        plural = "s" if len(devices) != 1 else ""
         reply = QMessageBox.question(
             self,
-            "Switch device",
-            f"Rebuild the channel list from {device.name} ({device.product_type})?\n\n"
+            "Switch device" + plural,
+            f"Rebuild the channel list from {len(devices)} device{plural}: {names}?\n\n"
             "This replaces the current AI/AO channel roster (frequencies, enabled state) "
-            "with one auto-generated from this device's actual channels.",
+            "with one auto-generated from these devices' actual channels. Channels from "
+            "more than one device are acquired together in a single synchronized run.",
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        self._config = autoconfigure(device)
+        self._config = autoconfigure(devices)
         self._data_store.reset()
         self._apply_channels_to_widgets()
         idx = self._backend_combo.findText(_BACKEND_HARDWARE)
@@ -344,18 +347,22 @@ class MainWindow(QMainWindow):
             self._ao_status_label.setStyleSheet(f"color: {WARN};")
             return
 
-        device = discovery.find_device(self._config.acquisition.device_name)
-        voltage_range = device.ao_voltage_range if device else (-10.0, 10.0)
-        specs = [
-            AOChannelSpec(
-                ao_channel=a.ao_channel,
-                tones=[ToneSpec(frequency_hz=a.frequency_hz, amplitude_v=a.amplitude_v)],
-                voltage_range=voltage_range or (-10.0, 10.0),
+        # Each output's channel is a full "Device/aoN" path, and outputs can span
+        # different cards -- look up the voltage range per channel's own device
+        # rather than assuming one shared device for all of them.
+        specs = []
+        for a in enabled:
+            device_name = a.ao_channel.split("/", 1)[0]
+            device = discovery.find_device(device_name)
+            voltage_range = (device.ao_voltage_range if device else None) or (-10.0, 10.0)
+            specs.append(
+                AOChannelSpec(
+                    ao_channel=a.ao_channel,
+                    tones=[ToneSpec(frequency_hz=a.frequency_hz, amplitude_v=a.amplitude_v)],
+                    voltage_range=voltage_range,
+                )
             )
-            for a in enabled
-        ]
         self._ao_generator = AOStimulusGenerator(
-            device_name=self._config.acquisition.device_name,
             sample_rate_hz=self._config.acquisition.sample_rate_hz,
             buffer_size=self._config.acquisition.block_size,
             channels=specs,

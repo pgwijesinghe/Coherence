@@ -36,7 +36,7 @@ def main() -> int:
         ch.enabled = True  # harshest case: demodulate every physical AI channel at once
     window._apply_channels_to_widgets()
 
-    print(f"Autoconfigured: device={window._config.acquisition.device_name} "
+    print(f"Autoconfigured: devices={window._config.acquisition.devices} "
           f"ai_channels={window._config.acquisition.ai_channels} "
           f"enabled_channels={[c.name for c in window._config.channels if c.enabled]}")
     assert window._backend_combo.currentText() == _BACKEND_HARDWARE

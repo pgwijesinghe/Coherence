@@ -33,25 +33,43 @@ class AOChannelConfig:
 
     name: str
     frequency_hz: float
-    ao_channel: str = "ao0"
-    """Physical AO channel, e.g. 'ao0'."""
+    ao_channel: str = "Dev1/ao0"
+    """Full physical AO channel path, e.g. 'Dev1/ao0' or 'PXI1Slot5/ao0'. Device-
+    qualified (not a bare 'ao0') so a stimulus channel can live on any card in a
+    multi-device setup, not just whichever one AI happens to be reading from."""
     amplitude_v: float = 1.0
     enabled: bool = True
 
 
 @dataclass(slots=True)
 class AcquisitionConfig:
-    """Sampling + FFT block parameters shared by all channels on a device."""
+    """Sampling + FFT block parameters, shared by every channel regardless of which
+    physical device it's actually on."""
 
     sample_rate_hz: float = 204_800.0
     block_size: int = 2048
     overlap_fraction: float = 0.5
     """0 = disjoint blocks, 0.5 = 50% overlap, etc. Trades compute for update rate/latency."""
     window: str = "blackmanharris"
-    device_name: str = "Dev1"
-    ai_channels: tuple[str, ...] = ("ai0",)
+    ai_channels: tuple[str, ...] = ("Dev1/ai0",)
+    """Full physical channel paths, e.g. ('PXI1Slot3/ai0', 'PXI1Slot3/ai1',
+    'PXI1Slot5/ai0', ...). Channels from more than one device here are acquired in a
+    single DAQmx task spanning all of them -- see nidaq_backend.py for what that
+    relies on. `ChannelConfig.input_channel` indexes into this tuple positionally,
+    same as always; it no longer implies "same device" for every entry."""
     input_range_v: float = 10.0
     simulated: bool = True
+
+    @property
+    def devices(self) -> tuple[str, ...]:
+        """Unique device names referenced by ai_channels, in first-seen order --
+        the first one is the synchronization master (see nidaq_backend.py)."""
+        seen: list[str] = []
+        for ch in self.ai_channels:
+            dev = ch.split("/", 1)[0]
+            if dev not in seen:
+                seen.append(dev)
+        return tuple(seen)
 
     @property
     def hop_size(self) -> int:
@@ -145,7 +163,7 @@ def default_config() -> LockinConfig:
         block_size=2048,
         overlap_fraction=0.5,
         window="blackmanharris",
-        ai_channels=("ai0", "ai1", "ai2"),
+        ai_channels=("Dev1/ai0", "Dev1/ai1", "Dev1/ai2"),
         simulated=True,
     )
     channels = [

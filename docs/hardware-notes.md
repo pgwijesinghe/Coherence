@@ -28,6 +28,39 @@ which of the usual suspects you're dealing with:
    or output-only modules. The app skips those automatically when picking a device
    at startup, and the Hardware tab shows everything so you can tell what's what.
 
+## Multiple cards in one chassis
+
+Every AI channel across every detected device is combined into one flat channel
+list, and every AO channel likewise — a chassis with six 4461s shows up as one
+roster of 12 AI + 12 AO channels, not six separate single-card configurations.
+Concretely: `AcquisitionConfig.ai_channels` and `AOChannelConfig.ao_channel` hold
+full physical paths (`"PXI1Slot3/ai0"`), not a bare channel name plus one shared
+device name — that's what lets channels from several cards sit side by side in
+one config, and what `effective_ai_config` and the FFT engine key off unchanged.
+
+All AI channels, regardless of device, go into a single DAQmx task. Multi-device
+tasks that share a chassis backplane are synchronized by the driver itself —
+DAQmx elects a timing master among the participating devices and distributes the
+sample clock and start trigger over the backplane automatically. This is standard
+driver behavior for simultaneous multi-module acquisition, not something this
+project implements; `clock_source` / `start_trigger_source` on `NIDaqBackend`
+remain available for a non-standard timing arrangement, but shouldn't be needed
+for cards in one PXI/PXIe chassis.
+
+The sample rate for a multi-device acquisition is bounded by whichever
+participating device is slowest — `_validate_against_detected_hardware` checks
+against the minimum across all of them and names the limiting device if the
+configured rate is too high.
+
+Caveat: this is verified by unit test and by construction, not by running it on
+an actual multi-card chassis (development happened against a single USB-4431).
+If cross-device sync behaves differently than described above on real chassis
+hardware, that mismatch is the first thing to check.
+
+The Hardware tab's device table supports selecting more than one row (Ctrl/Shift-
+click) — "Use Selected" combines just those cards, "Use All Detected" combines
+everything the driver currently sees.
+
 Also worth knowing: the `nidaqmx` Python package requires a reasonably recent
 DAQmx driver. On an older lab machine that has only ever run LabVIEW, the driver
 may predate what the package supports — `coherence --list` failing with a driver

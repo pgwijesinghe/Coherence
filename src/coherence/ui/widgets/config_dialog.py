@@ -40,7 +40,6 @@ class ConfigDialog(QDialog):
         self.setWindowTitle("Acquisition & Channel Configuration")
         self.setMinimumSize(980, 520)
         self._config = copy.deepcopy(config)
-        self._detected_devices: dict[str, discovery.DeviceSummary] = {}
 
         root = QVBoxLayout(self)
         body = QHBoxLayout()
@@ -88,15 +87,15 @@ class ConfigDialog(QDialog):
         form.addRow("Window", self._window)
 
         device_row = QHBoxLayout()
-        self._device_name = QComboBox()
-        self._device_name.setEditable(True)
-        self._device_name.currentTextChanged.connect(self._on_device_changed)
-        device_row.addWidget(self._device_name, stretch=1)
-        refresh_btn = QPushButton("Detect")
-        refresh_btn.setToolTip("Re-scan for connected NI devices")
-        refresh_btn.clicked.connect(self._refresh_devices)
-        device_row.addWidget(refresh_btn)
-        form.addRow("NI device", device_row)
+        detect_btn = QPushButton("Detect All Channels")
+        detect_btn.setToolTip(
+            "Fill the AI channels field below with every AI channel across every "
+            "currently detected device -- edit afterward to narrow it down."
+        )
+        detect_btn.clicked.connect(self._detect_all_channels)
+        device_row.addWidget(detect_btn)
+        device_row.addStretch(1)
+        form.addRow("Hardware", device_row)
 
         self._device_info_label = QLabel("")
         self._device_info_label.setWordWrap(True)
@@ -104,7 +103,7 @@ class ConfigDialog(QDialog):
         form.addRow("", self._device_info_label)
 
         self._ai_channels = QLineEdit()
-        self._ai_channels.setPlaceholderText("ai0, ai1, ai2")
+        self._ai_channels.setPlaceholderText("PXI1Slot3/ai0, PXI1Slot3/ai1, PXI1Slot5/ai0, ...")
         form.addRow("AI channels", self._ai_channels)
 
         self._input_range = QDoubleSpinBox()
@@ -194,7 +193,7 @@ class ConfigDialog(QDialog):
         return group
 
     def _add_ao_row(
-        self, name: str = "", ao_channel: str = "ao0", freq: float = 1_000.0,
+        self, name: str = "", ao_channel: str = "", freq: float = 1_000.0,
         amplitude: float = 1.0, enabled: bool = True,
     ) -> None:
         row = self._ao_table.rowCount()
@@ -212,50 +211,35 @@ class ConfigDialog(QDialog):
             self._ao_table.removeRow(row)
 
     # -- hardware discovery -------------------------------------------------
-    def _refresh_devices(self, select: str | None = None) -> None:
-        """Re-scan for connected NI devices and repopulate the picker.
+    def _detect_all_channels(self) -> None:
+        """Fill AI channels with every AI channel across every detected device --
+        combining multiple cards into one synchronized acquisition is the normal
+        case on a chassis system, so "all of them" is the useful default; edit the
+        field afterward to narrow it down to a subset."""
+        devices = discovery.list_devices()
+        ai_capable = [d for d in devices if d.ai_channel_names]
+        all_channels = [name for d in ai_capable for name in d.ai_channel_names]
+        if all_channels:
+            self._ai_channels.setText(", ".join(all_channels))
+        self._update_device_info_label(devices)
 
-        Device names (Dev1, Dev2, PXI1Slot2, ...) are assigned by NI-MAX and are not
-        portable between machines -- always show what's actually detected right now
-        rather than trusting a name saved in a config from a different machine.
-        """
-        target = select if select is not None else self._device_name.currentText()
-        self._detected_devices = {d.name: d for d in discovery.list_devices()}
-
-        self._device_name.blockSignals(True)
-        self._device_name.clear()
-        for name, dev in self._detected_devices.items():
-            label = f"{name}  ({dev.product_type})" if dev.product_type else name
-            self._device_name.addItem(label, name)
-        self._device_name.blockSignals(False)
-
-        idx = self._device_name.findData(target)
-        if idx >= 0:
-            self._device_name.setCurrentIndex(idx)
-        else:
-            self._device_name.setCurrentText(target)
-        self._update_device_info_label()
-
-    def _on_device_changed(self) -> None:
-        self._update_device_info_label()
-
-    def _current_device_name(self) -> str:
-        data = self._device_name.currentData()
-        return data if data else self._device_name.currentText().strip()
-
-    def _update_device_info_label(self) -> None:
+    def _update_device_info_label(self, devices: list[discovery.DeviceSummary] | None = None) -> None:
         if not discovery.nidaqmx_available():
-            self._device_info_label.setText("nidaqmx is not installed -- device list cannot be detected.")
+            self._device_info_label.setText("nidaqmx is not installed -- devices cannot be detected.")
             return
-        dev = self._detected_devices.get(self._current_device_name())
-        if dev is None:
-            self._device_info_label.setText("Not currently detected -- check it's connected and powered.")
-            return
-        rate = f"{dev.ai_max_multi_chan_rate_hz:,.0f} Hz" if dev.ai_max_multi_chan_rate_hz else "unknown"
-        self._device_info_label.setText(
-            f"Detected: {len(dev.ai_channel_names)} AI channel(s) {dev.ai_channel_names}, "
-            f"max multi-channel AI rate {rate}."
-        )
+        devices = discovery.list_devices() if devices is None else devices
+        ai_capable = [d for d in devices if d.ai_channel_names]
+        if not devices:
+            self._device_info_label.setText("No devices detected -- check they're connected and powered.")
+        elif not ai_capable:
+            self._device_info_label.setText(f"{len(devices)} device(s) detected, none with AI channels.")
+        else:
+            total_ai = sum(len(d.ai_channel_names) for d in ai_capable)
+            rates = [d.ai_max_multi_chan_rate_hz for d in ai_capable if d.ai_max_multi_chan_rate_hz]
+            rate_note = f", slowest max rate {min(rates):,.0f} Hz" if rates else ""
+            self._device_info_label.setText(
+                f"{len(ai_capable)} AI-capable device(s), {total_ai} channel(s) total{rate_note}."
+            )
 
     # -- load / derive / save -------------------------------------------------
     def _load_from_config(self) -> None:
@@ -265,7 +249,7 @@ class ConfigDialog(QDialog):
         self._block_size.setCurrentIndex(idx if idx >= 0 else 3)
         self._overlap.setValue(acq.overlap_fraction)
         self._window.setCurrentText(acq.window)
-        self._refresh_devices(select=acq.device_name)
+        self._update_device_info_label()
         self._ai_channels.setText(", ".join(acq.ai_channels))
         self._input_range.setValue(acq.input_range_v)
 
@@ -294,8 +278,9 @@ class ConfigDialog(QDialog):
             self._config.acquisition.block_size = self._block_size.currentData()
             self._config.acquisition.overlap_fraction = self._overlap.value()
             self._config.acquisition.window = self._window.currentText()
-            self._config.acquisition.device_name = self._current_device_name()
-            self._config.acquisition.ai_channels = ai_channels or ("ai0",)
+            if not ai_channels:
+                raise ValueError("At least one AI channel is required.")
+            self._config.acquisition.ai_channels = ai_channels
             self._config.acquisition.input_range_v = self._input_range.value()
 
             channels: list[ChannelConfig] = []

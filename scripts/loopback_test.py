@@ -57,13 +57,13 @@ def main() -> None:
     print(f"Sample rate {SAMPLE_RATE:.0f} Hz, block {BLOCK_SIZE} samples, bin spacing {BIN_SPACING:.1f} Hz")
     print("Stimulus: " + ", ".join(f"{t.frequency_hz:.0f} Hz @ {t.amplitude_v:.2f} V" for t in STIMULUS))
 
+    ai_channel = dev.ai_channel_names[0]
     acq = AcquisitionConfig(
         sample_rate_hz=SAMPLE_RATE,
         block_size=BLOCK_SIZE,
         overlap_fraction=0.5,
         window="blackmanharris",
-        device_name=dev.name,
-        ai_channels=("ai0",),
+        ai_channels=(ai_channel,),
         input_range_v=10.0,
     )
     channels = [
@@ -75,14 +75,12 @@ def main() -> None:
         err = config.coherence_error_hz(ch)
         assert err < 1e-6, f"{ch.name} is {err:.3f} Hz off-bin -- fix STIMULUS frequencies"
 
-    ao_channel = dev.ao_channel_names[0].split("/", 1)[1]  # "Dev2/ao0" -> "ao0"
     stimulus = AOStimulusGenerator(
-        device_name=dev.name,
         sample_rate_hz=SAMPLE_RATE,
         buffer_size=BLOCK_SIZE,
         channels=[
             AOChannelSpec(
-                ao_channel=ao_channel,
+                ao_channel=dev.ao_channel_names[0],
                 tones=STIMULUS,
                 voltage_range=dev.ao_voltage_range or (-3.5, 3.5),
             )

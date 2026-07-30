@@ -12,10 +12,10 @@ def _single_channel_generator(tones, buffer_size=2048, sample_rate=51_200.0, vol
     from coherence.daq.ao_stimulus import AOChannelSpec, AOStimulusGenerator
 
     return AOStimulusGenerator(
-        device_name="DevX",  # never opened -- _build_waveform doesn't touch hardware
         sample_rate_hz=sample_rate,
         buffer_size=buffer_size,
-        channels=[AOChannelSpec(ao_channel="ao0", tones=tones, voltage_range=voltage_range)],
+        # "DevX/ao0" is never opened -- _build_waveform doesn't touch hardware
+        channels=[AOChannelSpec(ao_channel="DevX/ao0", tones=tones, voltage_range=voltage_range)],
     )
 
 
@@ -77,16 +77,15 @@ def test_two_tone_composite_has_both_frequencies():
     assert spectrum[bin_1000] > spectrum[bin_1200] > 0
 
 
-def test_multi_channel_waveform_shape_and_independence():
+def test_multi_channel_waveform_shape_and_independence_across_devices():
     from coherence.daq.ao_stimulus import AOChannelSpec, AOStimulusGenerator, ToneSpec
 
     gen = AOStimulusGenerator(
-        device_name="DevX",
         sample_rate_hz=51_200.0,
         buffer_size=2048,
         channels=[
-            AOChannelSpec(ao_channel="ao0", tones=[ToneSpec(frequency_hz=1000.0, amplitude_v=1.0)]),
-            AOChannelSpec(ao_channel="ao1", tones=[ToneSpec(frequency_hz=1200.0, amplitude_v=0.3)]),
+            AOChannelSpec(ao_channel="DevX/ao0", tones=[ToneSpec(frequency_hz=1000.0, amplitude_v=1.0)]),
+            AOChannelSpec(ao_channel="DevY/ao0", tones=[ToneSpec(frequency_hz=1200.0, amplitude_v=0.3)]),
         ],
     )
     waveform = gen._build_waveform()
@@ -99,4 +98,4 @@ def test_requires_at_least_one_channel():
     from coherence.daq.ao_stimulus import AOStimulusGenerator
 
     with pytest.raises(ValueError, match="at least one AO channel"):
-        AOStimulusGenerator(device_name="DevX", sample_rate_hz=51_200.0, buffer_size=2048, channels=[])
+        AOStimulusGenerator(sample_rate_hz=51_200.0, buffer_size=2048, channels=[])
