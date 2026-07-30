@@ -88,6 +88,18 @@ of the first channel in `acquisition.ai_channels`) — there's no override for
 this yet, unlike the single-device path's `clock_source`/`start_trigger_source`
 parameters.
 
+**This applies to AO generation too, and was initially missed.** The first fix
+only touched the AI acquisition backend; `AOStimulusGenerator` still put every
+enabled reference-output channel into one task regardless of device, which
+hits the exact same "multidevice tasks" error the moment two reference
+channels live on different cards. It needed the identical one-task-per-device
+treatment — grouped by device, reference clock and sync pulse applied when
+more than one device is involved, slaves-first/master-last start order, each
+device's own task written with its own waveform. The reference-clock and
+sync-pulse logic itself lives in `daq/sync.py` and is shared verbatim between
+the AI backend and the AO generator rather than duplicated, specifically so a
+fix or a subtlety only has to be gotten right once.
+
 The sample rate for a multi-device acquisition is bounded by whichever
 participating device is slowest — `_validate_against_detected_hardware` checks
 against the minimum across all of them and names the limiting device if the
