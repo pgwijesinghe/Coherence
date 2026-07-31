@@ -52,6 +52,34 @@ class RingBuffer:
                 self._data[: end - self._capacity] = chunk[first:]
             self._write_pos += n
 
+    def read_available(self, read_pos: int, max_size: int) -> np.ndarray | None:
+        """Returns whatever's newly available in [read_pos, write_pos), capped at
+        max_size samples, or None if nothing new has been written yet.
+
+        Unlike try_read_block, the caller doesn't wait for a fixed-size window to
+        fill -- this is what lets StreamingLockinEngine process a chunk the moment
+        any new data exists, instead of being gated behind block_size samples.
+        """
+        with self._lock:
+            available = self._write_pos - read_pos
+            if available <= 0:
+                return None
+            if available > self._capacity:
+                raise BufferOverrunError(
+                    f"reader is {available} samples behind writer (capacity {self._capacity}); "
+                    "data was overwritten"
+                )
+            n = min(available, max_size)
+            start = read_pos % self._capacity
+            end = start + n
+            if end <= self._capacity:
+                return self._data[start:end].copy()
+            first = self._capacity - start
+            out = np.empty((n, self._num_channels), dtype=np.float64)
+            out[:first] = self._data[start:]
+            out[first:] = self._data[: end - self._capacity]
+            return out
+
     def try_read_block(self, read_pos: int, block_size: int) -> np.ndarray | None:
         """Returns a copy of [read_pos, read_pos+block_size) if fully available, else None.
 

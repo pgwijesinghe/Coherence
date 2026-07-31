@@ -47,3 +47,46 @@ def test_overrun_raised_when_reader_falls_behind():
     buf.push(np.ones((100, 1)))  # write_pos now 200, capacity 100 -> old data at read_pos=0 gone
     with pytest.raises(BufferOverrunError):
         buf.try_read_block(0, 50)
+
+
+def test_read_available_returns_none_until_anything_new_exists():
+    buf = RingBuffer(num_channels=1, capacity_samples=1000)
+    assert buf.read_available(0, max_size=500) is None
+    buf.push(np.ones((10, 1)))
+    assert buf.read_available(0, max_size=500) is not None
+
+
+def test_read_available_returns_whatever_is_new_uncapped_below_max():
+    """The whole point vs. try_read_block: no need to wait for a fixed-size window --
+    a small, odd-sized chunk is returned immediately."""
+    buf = RingBuffer(num_channels=1, capacity_samples=1000)
+    buf.push(np.arange(37, dtype=np.float64).reshape(37, 1))
+    result = buf.read_available(0, max_size=500)
+    assert result.shape == (37, 1)
+    assert np.array_equal(result, np.arange(37).reshape(37, 1))
+
+
+def test_read_available_caps_at_max_size():
+    buf = RingBuffer(num_channels=1, capacity_samples=1000)
+    buf.push(np.arange(300, dtype=np.float64).reshape(300, 1))
+    result = buf.read_available(0, max_size=100)
+    assert result.shape == (100, 1)
+    assert np.array_equal(result, np.arange(100).reshape(100, 1))
+
+
+def test_read_available_across_wraparound_boundary():
+    capacity = 300
+    buf = RingBuffer(num_channels=1, capacity_samples=capacity)
+    buf.push(np.arange(250, dtype=np.float64).reshape(250, 1))
+    buf.push(np.arange(250, 350, dtype=np.float64).reshape(100, 1))  # wraps past capacity
+    result = buf.read_available(200, max_size=1000)
+    expected = np.arange(200, 350, dtype=np.float64).reshape(150, 1)
+    assert np.array_equal(result, expected)
+
+
+def test_read_available_raises_overrun_when_reader_falls_behind():
+    buf = RingBuffer(num_channels=1, capacity_samples=100)
+    buf.push(np.ones((100, 1)))
+    buf.push(np.ones((100, 1)))
+    with pytest.raises(BufferOverrunError):
+        buf.read_available(0, max_size=50)

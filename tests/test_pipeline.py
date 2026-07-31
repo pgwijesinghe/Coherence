@@ -88,6 +88,33 @@ def test_worker_exception_is_surfaced_not_silent():
         pipeline.stop()  # must not hang even though the worker already exited on its own
 
 
+def test_streaming_engine_selected_by_config_produces_results_with_no_block_wait():
+    """acquisition.engine="streaming" must route the pipeline through
+    StreamingLockinEngine (and the small-chunk read loop) instead of FFTLockinEngine --
+    verified by checking results actually arrive, since the two engines aren't
+    interchangeable objects to compare directly."""
+    from coherence.dsp.streaming_engine import StreamingLockinEngine
+
+    acq = AcquisitionConfig(sample_rate_hz=20_000.0, engine="streaming")
+    channels = [ChannelConfig(name="CH1", frequency_hz=1_000.0, input_channel=0, time_constant_s=0.02)]
+    config = LockinConfig(acquisition=acq, channels=channels)
+    backend = SimulatedBackend(acq, channels, chunk_size=64, noise_std=0.0, animate=False)
+
+    pipeline = LockinPipeline(config, backend)
+    assert isinstance(pipeline._engine, StreamingLockinEngine)
+    results = []
+    pipeline.add_result_callback(results.append)
+    pipeline.start()
+    try:
+        assert _wait_until(lambda: len(results) >= 5)
+        assert results[0].channels["CH1"].frequency_hz == 1_000.0
+        stats = pipeline.stats
+        assert stats.running is True
+        assert stats.last_error is None
+    finally:
+        pipeline.stop()
+
+
 def test_backend_reported_errors_are_recoverable_not_fatal():
     """A backend-level error (e.g. a DAQmx read overrun) must be counted as an
     overrun and logged, but must NOT stop the pipeline or set stats.last_error --

@@ -1,11 +1,13 @@
-"""Wires an AcquisitionBackend -> RingBuffer -> FFTLockinEngine -> result callbacks.
+"""Wires an AcquisitionBackend -> RingBuffer -> a lock-in engine -> result callbacks.
 
-The FFT worker thread is decoupled from the acquisition thread's chunk cadence: it
-just keeps asking the ring buffer "is the next block ready yet", processes it the
-moment it is, and advances by `hop_size` (< block_size when overlap is configured).
-This is where the disjoint-vs-overlapping block trade-off from the design doc is
-actually implemented: smaller hop = more FFTs/sec = lower latency & higher update
-rate at the same ENBW, at proportionally higher CPU cost.
+Two worker loops, chosen by `config.acquisition.engine`:
+
+- "fft" (_run_worker_fft): the original loop. Keeps asking the ring buffer "is the
+  next block ready yet", processes it the moment it is, and advances by `hop_size`
+  (< block_size when overlap is configured). Update rate is coupled to block_size.
+- "streaming" (_run_worker_streaming): drains whatever's newly available in the ring
+  buffer -- of any size, as soon as any exists -- into StreamingLockinEngine. There's
+  no block_size to wait for; update rate is however often new data shows up.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from coherence.config import LockinConfig
 from coherence.core.ring_buffer import BufferOverrunError, RingBuffer
 from coherence.daq.base import AcquisitionBackend
 from coherence.dsp.fft_engine import BlockResult, FFTLockinEngine
+from coherence.dsp.streaming_engine import StreamingLockinEngine
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +51,8 @@ class LockinPipeline:
     ):
         self._config = config
         self._backend = backend
-        self._engine = FFTLockinEngine(config)
+        self._streaming = config.acquisition.engine == "streaming"
+        self._engine = StreamingLockinEngine(config) if self._streaming else FFTLockinEngine(config)
 
         capacity = max(
             config.acquisition.block_size * 8,
@@ -89,7 +93,8 @@ class LockinPipeline:
         self._stop_event.clear()
         self._start_wall_time = time.time()
         self._backend.start(self._ring.push)
-        self._worker = threading.Thread(target=self._run_worker, name="FFTLockinWorker", daemon=True)
+        target = self._run_worker_streaming if self._streaming else self._run_worker_fft
+        self._worker = threading.Thread(target=target, name="LockinWorker", daemon=True)
         with self._stats_lock:
             self._stats = PipelineStats(running=True)
         self._worker.start()
@@ -103,22 +108,25 @@ class LockinPipeline:
         with self._stats_lock:
             self._stats.running = False
 
-    def _run_worker(self) -> None:
+    def _drain_backend_errors(self) -> None:
+        for err in self._backend.drain_errors():
+            # e.g. a DAQmx read-overrun ("application not able to keep up") -- the
+            # backend keeps running underneath and will just have a gap in the data
+            # for however long the stall lasted. Reported the same way as our own
+            # ring-buffer overruns since both mean the same thing to the user: some
+            # samples were lost, not that acquisition needs to be restarted.
+            logger.warning("Acquisition backend reported a recoverable error: %s", err)
+            with self._stats_lock:
+                self._stats.overruns += 1
+
+    def _run_worker_fft(self) -> None:
         block_size = self._config.acquisition.block_size
         hop = self._config.acquisition.hop_size
         fs = self._config.acquisition.sample_rate_hz
         read_pos = 0
 
         while not self._stop_event.is_set():
-            for err in self._backend.drain_errors():
-                # e.g. a DAQmx read-overrun ("application not able to keep up") -- the
-                # backend keeps running underneath and will just have a gap in the data
-                # for however long the stall lasted. Reported the same way as our own
-                # ring-buffer overruns since both mean the same thing to the user: some
-                # samples were lost, not that acquisition needs to be restarted.
-                logger.warning("Acquisition backend reported a recoverable error: %s", err)
-                with self._stats_lock:
-                    self._stats.overruns += 1
+            self._drain_backend_errors()
 
             try:
                 block = self._ring.try_read_block(read_pos, block_size)
@@ -149,6 +157,43 @@ class LockinPipeline:
 
             self._dispatch(result)
             read_pos += hop
+            self._update_stats()
+
+    def _run_worker_streaming(self) -> None:
+        """No block_size to wait for -- drains whatever's newly in the ring buffer,
+        however small, into StreamingLockinEngine as soon as it exists."""
+        fs = self._config.acquisition.sample_rate_hz
+        max_read = self._ring.capacity
+        read_pos = 0
+
+        while not self._stop_event.is_set():
+            self._drain_backend_errors()
+
+            try:
+                chunk = self._ring.read_available(read_pos, max_read)
+            except BufferOverrunError:
+                logger.warning("Ring buffer overrun; resynchronizing to latest data.")
+                with self._stats_lock:
+                    self._stats.overruns += 1
+                read_pos = self._ring.write_pos
+                continue
+
+            if chunk is None:
+                time.sleep(0.001)
+                continue
+
+            try:
+                timestamp_s = self._start_wall_time + read_pos / fs
+                result = self._engine.process(chunk, chunk_start_sample=read_pos, timestamp_s=timestamp_s)
+            except Exception as exc:
+                logger.exception("Streaming worker failed processing a chunk -- stopping")
+                with self._stats_lock:
+                    self._stats.running = False
+                    self._stats.last_error = str(exc)
+                return
+
+            self._dispatch(result)
+            read_pos += chunk.shape[0]
             self._update_stats()
 
     def _dispatch(self, result: BlockResult) -> None:

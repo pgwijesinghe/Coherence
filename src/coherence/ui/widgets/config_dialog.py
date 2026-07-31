@@ -26,11 +26,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from coherence.config import WINDOW_CHOICES, AOChannelConfig, ChannelConfig, LockinConfig
+from coherence.config import ENGINE_CHOICES, WINDOW_CHOICES, AOChannelConfig, ChannelConfig, LockinConfig
 from coherence.daq import discovery
 
 _BLOCK_SIZES = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536]
-_CHANNEL_COLUMNS = ["Name", "Frequency (Hz)", "Input Ch.", "Enabled"]
+_ENGINE_LABELS = {"fft": "FFT (block, see Bin spacing/Update rate below)", "streaming": "Streaming (continuous, see Time Const per channel)"}
+_CHANNEL_COLUMNS = ["Name", "Frequency (Hz)", "Input Ch.", "Time Const (s)", "Enabled"]
 _AO_COLUMNS = ["Name", "AO Channel", "Frequency (Hz)", "Amplitude (V)", "Enabled"]
 
 
@@ -85,6 +86,16 @@ class ConfigDialog(QDialog):
         self._window = QComboBox()
         self._window.addItems(list(WINDOW_CHOICES))
         form.addRow("Window", self._window)
+
+        self._engine = QComboBox()
+        for key in ENGINE_CHOICES:
+            self._engine.addItem(_ENGINE_LABELS[key], key)
+        self._engine.setToolTip(
+            "FFT: one windowed block per update, all channels share block_size/overlap/window.\n"
+            "Streaming: continuous per-channel NCO mixer + running filter, no block to wait for -- "
+            "each channel's own Time Const (s) sets its measurement bandwidth instead."
+        )
+        form.addRow("Engine", self._engine)
 
         device_row = QHBoxLayout()
         detect_btn = QPushButton("Detect All Channels")
@@ -146,15 +157,21 @@ class ConfigDialog(QDialog):
 
         return group
 
-    def _add_row(self, name: str = "", freq: float = 50_000.0, input_ch: int = 0, enabled: bool = True) -> None:
+    def _add_row(
+        self, name: str = "", freq: float = 50_000.0, input_ch: int = 0,
+        time_constant_s: float = 0.1, enabled: bool = True,
+    ) -> None:
         row = self._table.rowCount()
         self._table.insertRow(row)
         self._table.setItem(row, 0, QTableWidgetItem(name or f"CH{row + 1}"))
         self._table.setItem(row, 1, QTableWidgetItem(f"{freq:.1f}"))
         self._table.setItem(row, 2, QTableWidgetItem(str(input_ch)))
+        time_const_item = QTableWidgetItem(f"{time_constant_s:.4g}")
+        time_const_item.setToolTip("Used only by the Streaming engine -- ignored by FFT.")
+        self._table.setItem(row, 3, time_const_item)
         check = QCheckBox()
         check.setChecked(enabled)
-        self._table.setCellWidget(row, 3, check)
+        self._table.setCellWidget(row, 4, check)
 
     def _remove_selected_rows(self) -> None:
         for row in sorted({idx.row() for idx in self._table.selectedIndexes()}, reverse=True):
@@ -249,13 +266,15 @@ class ConfigDialog(QDialog):
         self._block_size.setCurrentIndex(idx if idx >= 0 else 3)
         self._overlap.setValue(acq.overlap_fraction)
         self._window.setCurrentText(acq.window)
+        idx = self._engine.findData(acq.engine)
+        self._engine.setCurrentIndex(idx if idx >= 0 else 0)
         self._update_device_info_label()
         self._ai_channels.setText(", ".join(acq.ai_channels))
         self._input_range.setValue(acq.input_range_v)
 
         self._table.setRowCount(0)
         for ch in self._config.channels:
-            self._add_row(ch.name, ch.frequency_hz, ch.input_channel, ch.enabled)
+            self._add_row(ch.name, ch.frequency_hz, ch.input_channel, ch.time_constant_s, ch.enabled)
 
         self._ao_table.setRowCount(0)
         for ao in self._config.ao_channels:
@@ -278,6 +297,7 @@ class ConfigDialog(QDialog):
             self._config.acquisition.block_size = self._block_size.currentData()
             self._config.acquisition.overlap_fraction = self._overlap.value()
             self._config.acquisition.window = self._window.currentText()
+            self._config.acquisition.engine = self._engine.currentData()
             if not ai_channels:
                 raise ValueError("At least one AI channel is required.")
             self._config.acquisition.ai_channels = ai_channels
@@ -288,8 +308,14 @@ class ConfigDialog(QDialog):
                 name = self._table.item(row, 0).text().strip()
                 freq = float(self._table.item(row, 1).text())
                 input_ch = int(self._table.item(row, 2).text())
-                enabled = self._table.cellWidget(row, 3).isChecked()
-                channels.append(ChannelConfig(name=name, frequency_hz=freq, input_channel=input_ch, enabled=enabled))
+                time_constant_s = float(self._table.item(row, 3).text())
+                enabled = self._table.cellWidget(row, 4).isChecked()
+                channels.append(
+                    ChannelConfig(
+                        name=name, frequency_hz=freq, input_channel=input_ch,
+                        time_constant_s=time_constant_s, enabled=enabled,
+                    )
+                )
             self._config.channels = channels
 
             ao_channels: list[AOChannelConfig] = []

@@ -18,7 +18,7 @@ def test_accept_builds_updated_config(qtbot):
     qtbot.addWidget(dialog)
 
     dialog._sample_rate.setValue(96_000.0)
-    dialog._add_row("CH4", 30_000.0, 0, True)
+    dialog._add_row("CH4", 30_000.0, 0, time_constant_s=0.05, enabled=True)
     dialog._on_accept()
 
     result = dialog.result_config
@@ -54,6 +54,22 @@ def test_accept_builds_updated_ao_channels(qtbot):
     assert ao.ao_channel == "ao0"
     assert ao.frequency_hz == 2_000.0
     assert ao.amplitude_v == 1.5
+
+
+def test_engine_and_time_constant_round_trip(qtbot):
+    cfg = default_config()
+    cfg.acquisition.engine = "streaming"
+    cfg.channels[0].time_constant_s = 0.025
+    dialog = ConfigDialog(cfg)
+    qtbot.addWidget(dialog)
+
+    assert dialog._engine.currentData() == "streaming"
+    assert dialog._table.item(0, 3).text() == "0.025"
+
+    dialog._on_accept()
+    result = dialog.result_config
+    assert result.acquisition.engine == "streaming"
+    assert result.channels[0].time_constant_s == 0.025
 
 
 def test_derived_labels_update_on_change(qtbot):

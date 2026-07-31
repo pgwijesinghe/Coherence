@@ -37,6 +37,7 @@ from coherence.ui.theme import BAD, GOOD, WARN
 from coherence.ui.widgets.amplitude_phase_plot import AmplitudePhasePlot
 from coherence.ui.widgets.channel_table import ChannelTable
 from coherence.ui.widgets.config_dialog import ConfigDialog
+from coherence.ui.widgets.debug_panel import DebugPanel
 from coherence.ui.widgets.hardware_panel import HardwarePanel
 from coherence.ui.widgets.outputs_panel import OutputsPanel
 from coherence.ui.widgets.polar_view import PolarView
@@ -61,6 +62,7 @@ class MainWindow(QMainWindow):
         self._pipeline: LockinPipeline | None = None
         self._hdf5_logger: HDF5ResultLogger | None = None
         self._ao_generator: AOStimulusGenerator | None = None
+        self._current_backend: AcquisitionBackend | None = None
         self._data_store = LiveDataStore()
 
         self._build_menu_bar()
@@ -68,6 +70,7 @@ class MainWindow(QMainWindow):
         self._build_central_widget()
         self._build_status_bar()
         self._apply_channels_to_widgets()
+        self._debug_panel.attach_logging()
 
         if has_hardware:
             idx = self._backend_combo.findText(_BACKEND_HARDWARE)
@@ -164,10 +167,12 @@ class MainWindow(QMainWindow):
         self._amp_phase_view = AmplitudePhasePlot()
         self._spectrum_view = SpectrumView()
         self._polar_view = PolarView()
+        self._debug_panel = DebugPanel()
         self._tabs.addTab(self._hardware_panel, "Hardware")
         self._tabs.addTab(self._amp_phase_view, "Amplitude && Phase")
         self._tabs.addTab(self._spectrum_view, "Spectrum")
         self._tabs.addTab(self._polar_view, "Phasor")
+        self._tabs.addTab(self._debug_panel, "Debug")
         splitter.addWidget(self._tabs)
 
         splitter.setStretchFactor(0, 1)
@@ -311,6 +316,7 @@ class MainWindow(QMainWindow):
             if self._hdf5_logger is not None:
                 self._pipeline.add_result_callback(self._hdf5_logger.append)
             self._pipeline.start()
+            self._current_backend = backend
         except Exception as exc:
             logger.exception("Failed to start pipeline")
             QMessageBox.critical(self, "Failed to start acquisition", str(exc))
@@ -324,8 +330,14 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Failed to start reference output", str(exc))
             self._pipeline.stop()
             self._pipeline = None
+            self._current_backend = None
             return
 
+        self._debug_panel.set_run_info(effective_config, self._backend_combo.currentText())
+        self._debug_panel.set_sync_report(
+            getattr(self._current_backend, "sync_report", []),
+            self._ao_generator.sync_report if self._ao_generator is not None else [],
+        )
         self._set_running_state(True)
 
     def _on_stop(self) -> None:
@@ -334,6 +346,8 @@ class MainWindow(QMainWindow):
         self._stop_ao_outputs()
         self._pipeline.stop()
         self._pipeline = None
+        self._current_backend = None
+        self._debug_panel.clear_run_info()
         self._set_running_state(False)
 
     def _start_ao_outputs(self) -> None:
@@ -427,6 +441,7 @@ class MainWindow(QMainWindow):
                 return
             self._rate_label.setText(f"Update rate: {stats.measured_update_rate_hz:,.1f} Hz")
             self._overrun_label.setText(f"Overruns: {stats.overruns}")
+            self._debug_panel.update_stats(stats)
 
         latest = self._data_store.latest()
         if not latest:
@@ -455,4 +470,5 @@ class MainWindow(QMainWindow):
         if self._pipeline is not None:
             self._pipeline.stop()
         self._close_logger()
+        self._debug_panel.detach_logging()
         super().closeEvent(event)

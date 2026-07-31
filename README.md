@@ -28,6 +28,13 @@ software up on real hardware are in [docs/hardware-notes.md](docs/hardware-notes
   hardcoded: device names, channel counts, and rate limits are read from the driver.
 - Any number of demodulation channels per physical input. Each is defined by a name,
   a frequency, and the input it listens on.
+- Two demodulation engines, picked per run in Configure: the FFT engine described
+  above, where update rate is coupled to block size and every channel shares one
+  window; and a streaming engine (NCO mixer + a continuously running low-pass
+  filter per channel, no block to wait for) for when you want the fastest, smoothest
+  possible read-out and are willing to set each channel's own time constant instead
+  of a shared block size. The streaming engine also has no coherent-sampling
+  requirement at all -- it works at any frequency, not just ones landing on a bin.
 - Reference signal generation on the card's analog outputs, so a self-contained
   stimulus-and-measure experiment needs no external function generator. Output
   frequency and amplitude can be changed live while a run is in progress.
@@ -103,6 +110,7 @@ src/coherence/
   dsp/
     windows.py               window functions with gain/bandwidth corrections
     fft_engine.py            block in, per-channel amplitude/phase/X/Y out
+    streaming_engine.py      continuous NCO mixer + running filter, no block wait
   daq/
     discovery.py             what hardware does the driver see
     autoconfig.py            turn a detected device into a runnable config
@@ -114,7 +122,9 @@ src/coherence/
     pipeline.py              ties backend, buffer, engine and consumers together
   logging/
     hdf5_logger.py           per-channel HDF5 output
-  ui/                        Qt front panel (PySide6 + pyqtgraph)
+  ui/                        Qt front panel (PySide6 + pyqtgraph); Debug tab shows
+                              live application log, multi-device sync status, and
+                              pipeline stats for whatever run is currently active
 scripts/                     hardware verification scripts, see below
 tests/                       pytest suite, runs without hardware
 ```

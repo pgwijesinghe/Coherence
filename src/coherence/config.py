@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 
 WINDOW_CHOICES = ("blackmanharris", "hann", "hamming", "flattop", "rectangular")
+ENGINE_CHOICES = ("fft", "streaming")
 
 
 @dataclass(slots=True)
@@ -18,6 +19,10 @@ class ChannelConfig:
     enabled: bool = True
     color: str | None = None
     """Optional explicit plot color (hex string); auto-assigned if None."""
+    time_constant_s: float = 0.1
+    """Low-pass time constant used only by StreamingLockinEngine (dsp/streaming_engine.py)
+    -- sets that channel's filter cutoff at 1/(2*pi*time_constant_s), the same role
+    block_size/window play for FFTLockinEngine. Ignored by the FFT engine."""
 
 
 @dataclass(slots=True)
@@ -51,6 +56,12 @@ class AcquisitionConfig:
     overlap_fraction: float = 0.5
     """0 = disjoint blocks, 0.5 = 50% overlap, etc. Trades compute for update rate/latency."""
     window: str = "blackmanharris"
+    engine: str = "fft"
+    """"fft" (FFTLockinEngine: one windowed block per update, see dsp/fft_engine.py) or
+    "streaming" (StreamingLockinEngine: continuous per-sample NCO mixer + running
+    filter, see dsp/streaming_engine.py) -- update rate for "fft" is set by
+    block_size/overlap; for "streaming" it's decoupled entirely, and each channel's
+    own ChannelConfig.time_constant_s sets its measurement bandwidth instead."""
     ai_channels: tuple[str, ...] = ("Dev1/ai0",)
     """Full physical channel paths, e.g. ('PXI1Slot3/ai0', 'PXI1Slot3/ai1',
     'PXI1Slot5/ai0', ...). Channels from more than one device here are acquired in a
@@ -148,6 +159,7 @@ def effective_ai_config(config: LockinConfig) -> LockinConfig:
             input_channel=remap[c.input_channel],
             enabled=True,
             color=c.color,
+            time_constant_s=c.time_constant_s,
         )
         for c in enabled
     ]
